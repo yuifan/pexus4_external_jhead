@@ -61,6 +61,11 @@ extern int DumpExifMap;
 
 #define MAX_DATE_COPIES 10
 
+// Buffer size must large enough to hold maximum location string
+// containing six signed integers plus delimeters and terminator,
+// i.e.: 11 * 6 + 3(‘/’) + 2(’,’) + 1(\0) = 72
+#define MAX_BUF_SIZE    72
+
 typedef struct {
     uint32_t num;
     uint32_t denom;
@@ -114,10 +119,10 @@ typedef struct {
 
     int GpsInfoPresent;
     char GpsLat[31];
-    char GpsLatRaw[31];
+    char GpsLatRaw[MAX_BUF_SIZE];
     char GpsLatRef[2];
     char GpsLong[31];
-    char GpsLongRaw[31];
+    char GpsLongRaw[MAX_BUF_SIZE];
     char GpsLongRef[2];
     char GpsAlt[20];
     rat_t GpsAltRaw;
@@ -176,8 +181,9 @@ int Get16u(void * Short);
 unsigned Get32u(void * Long);
 int Get32s(void * Long);
 void Put32u(void * Value, unsigned PutValue);
-void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount);
+void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount, int hasDateTimeTag);
 int TagNameToValue(const char* tagName);
+int IsDateTimeTag(unsigned short tag);
 
 //--------------------------------------------------------------------------
 // Exif format descriptor stuff
@@ -209,6 +215,7 @@ int IsGpsTag(const char* tag);
 int GpsTagToFormatType(unsigned short tag);
 int GpsTagNameToValue(const char* tagName);
 TagTable_t* GpsTagToTagTableEntry(unsigned short tag);
+static const char ExifAsciiPrefix[] = { 0x41, 0x53, 0x43, 0x49, 0x49, 0x0, 0x0, 0x0 };
 
 // iptc.c prototpyes
 void show_IPTC (unsigned char * CharBuf, unsigned int length);
@@ -230,6 +237,7 @@ void DiscardData(void);
 void DiscardAllButExif(void);
 int ReadJpegFile(const char * FileName, ReadMode_t ReadMode);
 int ReplaceThumbnail(const char * ThumbFileName);
+int ReplaceThumbnailFromBuffer(const char* Thumb, int ThumbLen);
 int SaveThumbnail(char * ThumbFileName);
 int RemoveSectionType(int SectionType);
 int RemoveUnknownSections(void);
@@ -237,6 +245,8 @@ int WriteJpegFile(const char * FileName);
 Section_t * FindSection(int SectionType);
 Section_t * CreateSection(int SectionType, unsigned char * Data, int size);
 void ResetJpgfile(void);
+int ReadJpegSectionsFromBuffer (unsigned char* buffer, unsigned int buffer_size, ReadMode_t ReadMode);
+int WriteJpegToBuffer(unsigned char* buffer, unsigned int buffer_size);
 
 // Variables from jhead.c used by exif.c
 extern ImageInfo_t ImageInfo;
@@ -273,5 +283,3 @@ extern char* formatStr(int format);
 #define M_DHT   0xC4
 #define M_DRI   0xDD
 #define M_IPTC  0xED          // IPTC marker
-
-

@@ -47,13 +47,11 @@ static TagTable_t GpsTags[]= {
     { 0x18, "GPSDestBearing", FMT_SRATIONAL, 1},
     { 0x19, "GPSDestDistanceRef", FMT_STRING, 2},
     { 0x1A, "GPSDestDistance", FMT_SRATIONAL, 1},
-    { 0x1B, "GPSProcessingMethod", FMT_STRING, -1},
+    { 0x1B, "GPSProcessingMethod", FMT_UNDEFINED, -1},
     { 0x1C, "GPSAreaInformation", FMT_STRING, -1},
     { 0x1D, "GPSDateStamp", FMT_STRING, 11},
     { 0x1E, "GPSDifferential", FMT_SSHORT, 1},
 };
-
-static const char ExifAsciiPrefix[] = { 0x41, 0x53, 0x43, 0x49, 0x49, 0x0, 0x0, 0x0 };
 
 #define MAX_GPS_TAG  (sizeof(GpsTags) / sizeof(TagTable_t))
 #define EXIF_ASCII_PREFIX_LEN (sizeof(ExifAsciiPrefix))
@@ -62,7 +60,7 @@ static const char ExifAsciiPrefix[] = { 0x41, 0x53, 0x43, 0x49, 0x49, 0x0, 0x0, 
 #undef SUPERDEBUG
 
 #ifdef SUPERDEBUG
-#define printf LOGE
+#define printf ALOGE
 #endif
 
 
@@ -189,7 +187,7 @@ void ProcessGpsInfo(unsigned char * DirStart, int ByteCountUnused, unsigned char
 
         switch(Tag){
             char FmtString[21];
-            char TempString[50];
+            char TempString[MAX_BUF_SIZE];
             double Values[3];
 
             case TAG_GPS_LAT_REF:
@@ -239,9 +237,9 @@ void ProcessGpsInfo(unsigned char * DirStart, int ByteCountUnused, unsigned char
                     Get32s(8+(char*)ValuePtr), Get32s(12+(char*)ValuePtr),
                     Get32s(16+(char*)ValuePtr), Get32s(20+(char*)ValuePtr));
                 if (Tag == TAG_GPS_LAT){
-                    strncpy(ImageInfo.GpsLatRaw, TempString, 31);
+                    strncpy(ImageInfo.GpsLatRaw, TempString, MAX_BUF_SIZE);
                 }else{
-                    strncpy(ImageInfo.GpsLongRaw, TempString, 31);
+                    strncpy(ImageInfo.GpsLongRaw, TempString, MAX_BUF_SIZE);
                 }
                 break;
 
@@ -280,7 +278,7 @@ void ProcessGpsInfo(unsigned char * DirStart, int ByteCountUnused, unsigned char
                         (char*)(ValuePtr + EXIF_ASCII_PREFIX_LEN), length);
                     ImageInfo.GpsProcessingMethod[length] = 0;
                 } else {
-                    LOGW("Unsupported encoding for GPSProcessingMethod");
+                    ALOGW("Unsupported encoding for GPSProcessingMethod");
                 }
                 break;
         }

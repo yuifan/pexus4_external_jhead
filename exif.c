@@ -28,7 +28,7 @@ int NumOrientations = 0;
 #undef SUPERDEBUG
 
 #ifdef SUPERDEBUG
-#define printf LOGE
+#define printf ALOGE
 #endif
 
 //--------------------------------------------------------------------------
@@ -231,7 +231,7 @@ static const TagTable_t TagTable[] = {
   { TAG_CFA_PATTERN1,           "CFAPattern", 0, 0},
   { TAG_BATTERY_LEVEL,          "BatteryLevel", 0, 0},
   { TAG_COPYRIGHT,              "Copyright", FMT_STRING, -1},
-  { TAG_EXPOSURETIME,           "ExposureTime", FMT_USHORT, 1},
+  { TAG_EXPOSURETIME,           "ExposureTime", FMT_SRATIONAL, 1},
   { TAG_FNUMBER,                "FNumber", FMT_SRATIONAL, 1},
   { TAG_IPTC_NAA,               "IPTC/NAA", 0, 0},
   { TAG_EXIF_OFFSET,            "ExifOffset", 0, 0},
@@ -309,6 +309,11 @@ int TagNameToValue(const char* tagName)
     }
     printf("tag %s NOT FOUND", tagName);
     return -1;
+}
+
+int IsDateTimeTag(unsigned short tag)
+{
+    return ((tag == TAG_DATETIME)? TRUE: FALSE);
 }
 
 //--------------------------------------------------------------------------
@@ -454,6 +459,82 @@ double ConvertAnyFormat(void * ValuePtr, int Format)
             ErrNonfatal("Illegal format code %d",Format,0);
     }
     return Value;
+}
+
+//--------------------------------------------------------------------------
+// Convert a double value into a signed or unsigned rational number.
+//--------------------------------------------------------------------------
+static void float2urat(double value, unsigned int max, unsigned int *numerator,
+                       unsigned int *denominator) {
+    if (value <= 0) {
+        *numerator = 0;
+        *denominator = 1;
+        return;
+    }
+
+    if (value > max) {
+        *numerator = max;
+        *denominator = 1;
+        return;
+    }
+
+    // For values less than 1e-9, scale as much as possible
+    if (value < 1e-9) {
+        unsigned int n = (unsigned int)(value * max);
+        if (n == 0) {
+            *numerator = 0;
+            *denominator = 1;
+        } else {
+            *numerator = n;
+            *denominator = max;
+        }
+        return;
+    }
+
+    // Try to use a denominator of 1e9, 1e8, ..., until the numerator fits
+    unsigned int d;
+    for (d = 1000000000; d >= 1; d /= 10) {
+        double s = value * d;
+        if (s <= max) {
+            // Remove the trailing zeros from both.
+            unsigned int n = (unsigned int)s;
+            while (n % 10 == 0 && d >= 10) {
+                n /= 10;
+                d /= 10;
+            }
+            *numerator = n;
+            *denominator = d;
+            return;
+        }
+    }
+
+    // Shouldn't reach here because the denominator 1 should work
+    // above. But just in case.
+    *numerator = 0;
+    *denominator = 1;
+}
+
+static void ConvertDoubleToURational(double value, unsigned int *numerator,
+                                     unsigned int *denominator) {
+    float2urat(value, 0xFFFFFFFFU, numerator, denominator);
+}
+
+static void ConvertDoubleToSRational(double value, int *numerator,
+                                     int *denominator) {
+    int negative = 0;
+
+    if (value < 0) {
+        value = -value;
+        negative = 1;
+    }
+
+    unsigned int n, d;
+    float2urat(value, 0x7FFFFFFFU, &n, &d);
+    *numerator = (int)n;
+    *denominator = (int)d;
+    if (negative) {
+        *numerator = -*numerator;
+    }
 }
 
 //--------------------------------------------------------------------------
@@ -684,17 +765,27 @@ static void ProcessExifDir(unsigned char * DirStart, unsigned char * OffsetBase,
                 }
 
                 // Copy the comment
-                if (memcmp(ValuePtr, "ASCII",5) == 0){
-                    for (a=5;a<10;a++){
-                        int c;
-                        c = (ValuePtr)[a];
-                        if (c != '\0' && c != ' '){
-                            strncpy(ImageInfo.Comments, (char *)ValuePtr+a, 199);
-                            break;
+                {
+                    // We want to set copied comment length (msize) to be the
+                    // minimum of:
+                    // (1) The space still available in Exif
+                    // (2) The given comment length (ByteCount)
+                    // (3) MAX_COMMENT_SIZE - 1
+                    int msiz = ExifLength - (ValuePtr-OffsetBase);
+                    if (msiz > ByteCount) msiz = ByteCount;
+                    if (msiz > MAX_COMMENT_SIZE - 1) msiz = MAX_COMMENT_SIZE - 1;
+                    if (msiz > 5 && memcmp(ValuePtr, "ASCII", 5) == 0) {
+                        for (a = 5; a < 10 && a < msiz; a++) {
+                            int c = (ValuePtr)[a];
+                            if (c != '\0' && c != ' ') {
+                                strncpy(ImageInfo.Comments,
+                                        (char *)ValuePtr + a, msiz - a);
+                                break;
+                            }
                         }
+                    } else {
+                        strncpy(ImageInfo.Comments, (char *)ValuePtr, msiz);
                     }
-                }else{
-                    strncpy(ImageInfo.Comments, (char *)ValuePtr, MAX_COMMENT_SIZE-1);
                 }
                 break;
 
@@ -1085,13 +1176,28 @@ static void writeExifTagAndData(int tag,
                                 char* Buffer,
                                 int* DirIndex,
                                 int* DataWriteIndex) {
+    void* componentsPosition = NULL; // for saving component position
+
     Put16u(Buffer+ (*DirIndex), tag);                    // Tag
     Put16u(Buffer+(*DirIndex) + 2, format);              // Format
     if (format == FMT_STRING && components == -1) {
         components = strlen((char*)value) + 1;                 // account for null terminator
         if (components & 1) ++components;               // no odd lengths
+    } else if (format == FMT_SSHORT && components == -1) {
+        // jhead only supports reading one SSHORT anyway
+        components = 1;
+    }
+    if (format == FMT_UNDEFINED && components == -1) {
+        // check if this UNDEFINED format is actually ASCII (as it usually is)
+        // if so, we can calculate the size
+        if(memcmp((char*)value, ExifAsciiPrefix, sizeof(ExifAsciiPrefix)) == 0) {
+            components = sizeof(ExifAsciiPrefix) +
+                         strlen((char*)value + sizeof(ExifAsciiPrefix)) + 1;
+            if (components & 1) ++components;               // no odd lengths
+        }
     }
     Put32u(Buffer+(*DirIndex) + 4, components);         // Components
+    componentsPosition = Buffer+(*DirIndex) + 4; // components # can change for lists
     printf("# components: %ld", components);
     if (format == FMT_STRING) {
         // short strings can fit right in the long, otherwise have to
@@ -1104,42 +1210,74 @@ static void writeExifTagAndData(int tag,
             strncpy(Buffer+(*DataWriteIndex), (char*)value, components);
             (*DataWriteIndex) += components;
         }
+    } else if ((format == FMT_UNDEFINED) &&
+               (memcmp((char*)value, ExifAsciiPrefix, sizeof(ExifAsciiPrefix)) == 0)) {
+        // short strings can fit right in the long, otherwise have to
+        // go in the data area
+        if (components <= 4) {
+            memcpy(Buffer+(*DirIndex) + 8, (char*)value, components);
+        } else {
+            Put32u(Buffer+(*DirIndex) + 8, (*DataWriteIndex)-8);   // Pointer
+            printf("copying %s to %d", (char*)value + sizeof(ExifAsciiPrefix), (*DataWriteIndex));
+            memcpy(Buffer+(*DataWriteIndex), (char*)value, components);
+            (*DataWriteIndex) += components;
+        }
     } else if (!valueInString) {
         Put32u(Buffer+(*DirIndex) + 8, value);   // Value
     } else {
         Put32u(Buffer+(*DirIndex) + 8, (*DataWriteIndex)-8);   // Pointer
-        char* curElement = strtok((char*)value, ",");
+        // Usually the separator is ',', but sometimes ':' is used, like
+        // TAG_GPS_TIMESTAMP.
+        char* curElement = strtok((char*)value, ",:");
         int i;
-        for (i = 0; i < components && curElement != NULL; i++) {
+
+        // (components == -1) Need to handle lists with unknown length too
+        for (i = 0; ((i < components) || (components == -1)) && curElement != NULL; i++) {
 #ifdef SUPERDEBUG
             printf("processing component %s format %s", curElement, formatStr(format));
 #endif
             // elements are separated by commas
             if (format == FMT_URATIONAL) {
+                unsigned int numerator;
+                unsigned int denominator;
                 char* separator = strchr(curElement, '/');
                 if (separator) {
-                    unsigned int numerator = atoi(curElement);
-                    unsigned int denominator = atoi(separator + 1);
-                    Put32u(Buffer+(*DataWriteIndex), numerator);
-                    Put32u(Buffer+(*DataWriteIndex) + 4, denominator);
-                    (*DataWriteIndex) += 8;
+                    numerator = atoi(curElement);
+                    denominator = atoi(separator + 1);
+                } else {
+                    double value = atof(curElement);
+                    ConvertDoubleToURational(value, &numerator, &denominator);
                 }
+                Put32u(Buffer+(*DataWriteIndex), numerator);
+                Put32u(Buffer+(*DataWriteIndex) + 4, denominator);
+                (*DataWriteIndex) += 8;
             } else if (format == FMT_SRATIONAL) {
+                int numerator;
+                int denominator;
                 char* separator = strchr(curElement, '/');
                 if (separator) {
-                    int numerator = atoi(curElement);
-                    int denominator = atoi(separator + 1);
-                    Put32u(Buffer+(*DataWriteIndex), numerator);
-                    Put32u(Buffer+(*DataWriteIndex) + 4, denominator);
-                    (*DataWriteIndex) += 8;
+                    numerator = atoi(curElement);
+                    denominator = atoi(separator + 1);
+                } else {
+                    double value = atof(curElement);
+                    ConvertDoubleToSRational(value, &numerator, &denominator);
                 }
+                Put32u(Buffer+(*DataWriteIndex), numerator);
+                Put32u(Buffer+(*DataWriteIndex) + 4, denominator);
+                (*DataWriteIndex) += 8;
+            } else if ((components == -1) && ((format == FMT_USHORT) || (format == FMT_SSHORT))) {
+                // variable components need to go into data write area
+                value = atoi(curElement);
+                Put16u(Buffer+(*DataWriteIndex), value);
+                (*DataWriteIndex) += 4;
             } else {
                 // TODO: doesn't handle multiple components yet -- if more than one, have to put in data write area.
                 value = atoi(curElement);
                 Put32u(Buffer+(*DirIndex) + 8, value);   // Value
             }
-            curElement = strtok(NULL, ",");
+            curElement = strtok(NULL, ",:");
         }
+        if (components == -1) Put32u(componentsPosition, i); // update component # for unknowns
     }
     (*DirIndex) += 12;
 }
@@ -1168,19 +1306,15 @@ char* formatStr(int format) {
 // Create minimal exif header - just date and thumbnail pointers,
 // so that date and thumbnail may be filled later.
 //--------------------------------------------------------------------------
-void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount)
+static void create_EXIF_internal(ExifElement_t* elements, int exifTagCount, int gpsTagCount, int hasDateTimeTag, char* Buffer)
 {
-    // TODO: We need to dynamically allocate this buffer and resize it when
-    // necessary while writing so we don't do a buffer overflow.
-    char Buffer[1024];
-
     unsigned short NumEntries;
     int DataWriteIndex;
     int DirIndex;
-    int DirContinuation = 0;
+    int DirExifLink = 0;
 
 #ifdef SUPERDEBUG
-    LOGE("create_EXIF %d exif elements, %d gps elements", exifTagCount, gpsTagCount);
+    ALOGE("create_EXIF %d exif elements, %d gps elements", exifTagCount, gpsTagCount);
 #endif
     
     MotorolaOrder = 0;
@@ -1193,9 +1327,14 @@ void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount)
 
     {
         DirIndex = DataWriteIndex;
-        NumEntries = 2 + exifTagCount;  // the two extra are the datetime and the thumbnail
+        NumEntries = 1 + exifTagCount;  // the extra is the thumbnail
         if (gpsTagCount) {
             ++NumEntries;       // allow for the GPS info tag
+        }
+        if (!hasDateTimeTag) {
+            // We have to write extra date time tag. The entry number should be
+            // adjusted.
+            ++NumEntries;
         }
         DataWriteIndex += 2 + NumEntries*12 + 4;
 
@@ -1203,11 +1342,11 @@ void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount)
         DirIndex += 2;
   
         // Entries go here...
-        {
+        if (!hasDateTimeTag) {
             // Date/time entry
             char* dateTime = NULL;
             char dateBuf[20];
-            if (ImageInfo.numDateTimeTags){
+            if (ImageInfo.numDateTimeTags) {
                 // If we had a pre-existing exif header, use time from that.
                 dateTime = ImageInfo.DateTime;
             } else {
@@ -1236,7 +1375,7 @@ void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount)
                     continue;
                 }
 #ifdef SUPERDEBUG
-                LOGE("create_EXIF saving tag %x value \"%s\"",elements[i].Tag, elements[i].Value);
+                ALOGE("create_EXIF saving tag %x value \"%s\"",elements[i].Tag, elements[i].Value);
 #endif
                 writeExifTagAndData(elements[i].Tag,
                                     entry->Format,
@@ -1247,7 +1386,7 @@ void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount)
                                     &DirIndex,
                                     &DataWriteIndex);
             }
-        
+
             if (gpsTagCount) {
                 // Link to gps dir entry
                 writeExifTagAndData(TAG_GPSINFO,
@@ -1265,7 +1404,7 @@ void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount)
             if (gpsTagCount) {
                 exifDirPtr += 2 + gpsTagCount*12 + 4;
             }
-            DirContinuation = DirIndex;
+            DirExifLink = DirIndex;
             writeExifTagAndData(TAG_EXIF_OFFSET,
                                 FMT_ULONG,
                                 1,
@@ -1277,7 +1416,7 @@ void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount)
         }
 
         // End of directory - contains optional link to continued directory.
-        DirContinuation = DirIndex;
+        Put32u(Buffer+DirIndex, 0);
         printf("Ending Exif section DirIndex = %d DataWriteIndex %d", DirIndex, DataWriteIndex);
     }
 
@@ -1302,7 +1441,7 @@ void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount)
                     continue;
                 }
 #ifdef SUPERDEBUG
-                LOGE("create_EXIF saving GPS tag %x value \"%s\"",elements[i].Tag, elements[i].Value);
+                ALOGE("create_EXIF saving GPS tag %x value \"%s\"",elements[i].Tag, elements[i].Value);
 #endif
                 writeExifTagAndData(elements[i].Tag,
                                     entry->Format,
@@ -1321,8 +1460,8 @@ void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount)
     }
 
     {
-        //Continuation which links to this directory;
-        Put32u(Buffer+DirContinuation, DataWriteIndex-8);
+        // Overwriting TAG_EXIF_OFFSET which links to this directory
+        Put32u(Buffer+DirExifLink+8, DataWriteIndex-8);
 
         printf("Starting Thumbnail section DirIndex = %d", DirIndex);
         DirIndex = DataWriteIndex;
@@ -1381,6 +1520,21 @@ void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount)
         // Re-parse new exif section, now that its in place
         // otherwise, we risk touching data that has already been freed.
         process_EXIF(NewBuf, DataWriteIndex);
+    }
+}
+
+void create_EXIF(ExifElement_t* elements, int exifTagCount, int gpsTagCount, int hasDateTimeTag)
+{
+    // It is hard to calculate exact necessary size for editing the exif
+    // header dynamically, so we are using the maximum size of EXIF, 64K
+    const int EXIF_MAX_SIZE = 1024*64;
+    char* Buffer = malloc(EXIF_MAX_SIZE);
+
+    if (Buffer != NULL) {
+        create_EXIF_internal(elements, exifTagCount, gpsTagCount, hasDateTimeTag, Buffer);
+        free(Buffer);
+    } else {
+        ErrFatal("Could not allocate memory");
     }
 }
 

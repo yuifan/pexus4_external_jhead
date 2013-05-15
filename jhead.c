@@ -104,7 +104,7 @@ static int ShowFileInfo = TRUE;     // Indicates to show standard file info
 //--------------------------------------------------------------------------
 void ErrFatal(char * msg)
 {
-    LOGE("Error : %s\n", msg);
+    ALOGE("Error : %s\n", msg);
     if (CurrentFile) fprintf(stderr,"in file '%s'\n",CurrentFile);
     exit(EXIT_FAILURE);
 } 
@@ -115,8 +115,8 @@ void ErrFatal(char * msg)
 //--------------------------------------------------------------------------
 void ErrNonfatal(char * msg, int a1, int a2)
 {
-    LOGV("Nonfatal Error : ");
-    LOGV(msg, a1, a2);
+    ALOGV("Nonfatal Error : ");
+    ALOGV(msg, a1, a2);
     if (SupressNonFatalErrors) return;
 
     fprintf(stderr,"\nNonfatal Error : ");
@@ -911,7 +911,7 @@ void ProcessFile(const char * FileName)
 
     if (CreateExifSection){
         // Make a new minimal exif section
-        create_EXIF(NULL, 0, 0);
+        create_EXIF(NULL, 0, 0, 0);
         Modified = TRUE;
     }
 
@@ -1696,4 +1696,3 @@ int main (int argc, char **argv)
 #endif
 
 #endif   // commented out -- security risk
-
